@@ -1,0 +1,19 @@
+{
+  "name": "notifylog-backend",
+  "version": "1.0.0",
+  "description": "NotifyLog backend proxy for LLM insights",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "openai": "^4.73.0",
+    "cors": "^2.8.5",
+    "helmet": "^8.0.0",
+    "express-rate-limit": "^7.4.1",
+    "uuid": "^10.0.0",
+    "dotenv": "^16.4.5"
+  }
+}
