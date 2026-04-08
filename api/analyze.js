@@ -1,10 +1,13 @@
 const OpenAI = require("openai");
 const { loadDb, saveDb } = require("../lib/db");
 const { SYSTEM_PROMPT } = require("../lib/prompt");
+const { cors } = require("../lib/cors");
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 module.exports = async (req, res) => {
+  if (cors(req, res)) return;
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
