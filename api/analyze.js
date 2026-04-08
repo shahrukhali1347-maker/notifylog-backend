@@ -3,71 +3,64 @@ const { loadDb, saveDb } = require("../lib/db");
 const { SYSTEM_PROMPT } = require("../lib/prompt");
 const { cors } = require("../lib/cors");
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
 module.exports = async (req, res) => {
-  if (cors(req, res)) return;
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const deviceId = req.headers["x-device-id"];
-
-  if (!deviceId) {
-    return res.status(401).json({
-      error: "missing_device_id",
-      message: "X-Device-Id header is required. Register first via POST /api/register",
-    });
-  }
-
-  const db = loadDb();
-  const device = db.devices[deviceId];
-
-  if (!device) {
-    return res.status(401).json({
-      error: "unknown_device",
-      message: "Device not registered. Call POST /api/register first.",
-    });
-  }
-
-  if (device.isBlocked) {
-    return res.status(403).json({
-      error: "device_blocked",
-      message: "This device has been blocked.",
-    });
-  }
-
-  // Simple rate limit: max 10 requests per hour per device
-  const oneHourAgo = Date.now() - 60 * 60 * 1000;
-  const recentRequests = db.logs.filter(
-    (l) => l.deviceId === deviceId && l.timestamp > oneHourAgo && l.status === "SUCCESS"
-  ).length;
-
-  if (recentRequests >= 10) {
-    return res.status(429).json({
-      error: "rate_limit",
-      message: "Too many requests. Please try again later.",
-    });
-  }
-
-  const { notifications } = req.body || {};
-
-  if (!notifications || !Array.isArray(notifications) || notifications.length === 0) {
-    return res.status(400).json({
-      error: "invalid_payload",
-      message: "Request body must contain a non-empty 'notifications' array.",
-    });
-  }
-
-  if (notifications.length > 500) {
-    return res.status(400).json({
-      error: "too_many_notifications",
-      message: "Maximum 500 notifications per request.",
-    });
-  }
-
   try {
+    if (cors(req, res)) return;
+
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const deviceId = req.headers["x-device-id"];
+
+    if (!deviceId) {
+      return res.status(401).json({
+        error: "missing_device_id",
+        message: "X-Device-Id header is required.",
+      });
+    }
+
+    const db = loadDb();
+    let device = db.devices[deviceId];
+
+    // Auto-register if device not found (handles /tmp resets on Vercel)
+    if (!device) {
+      db.devices[deviceId] = {
+        deviceName: "Auto-registered",
+        createdAt: Date.now(),
+        lastSeenAt: Date.now(),
+        totalRequests: 0,
+        isBlocked: false,
+      };
+      saveDb(db);
+      device = db.devices[deviceId];
+    }
+
+    if (device.isBlocked) {
+      return res.status(403).json({
+        error: "device_blocked",
+        message: "This device has been blocked.",
+      });
+    }
+
+    const { notifications } = req.body || {};
+
+    if (!notifications || !Array.isArray(notifications) || notifications.length === 0) {
+      return res.status(400).json({
+        error: "invalid_payload",
+        message: "Request body must contain a non-empty 'notifications' array.",
+      });
+    }
+
+    if (notifications.length > 500) {
+      return res.status(400).json({
+        error: "too_many_notifications",
+        message: "Maximum 500 notifications per request.",
+      });
+    }
+
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
     const userPrompt = `Analyze the following ${notifications.length} notification records:\n\n${JSON.stringify(notifications)}`;
 
     const completion = await openai.chat.completions.create({
@@ -84,40 +77,50 @@ module.exports = async (req, res) => {
     const tokensUsed = completion.usage?.total_tokens || 0;
 
     if (!content) {
-      throw new Error("Empty response from OpenAI");
+      return res.status(500).json({
+        error: "empty_response",
+        message: "AI returned an empty response. Try again.",
+      });
     }
 
     const parsed = JSON.parse(content);
 
     // Log success
-    device.lastSeenAt = Date.now();
-    device.totalRequests++;
-    db.logs.push({
-      deviceId,
-      timestamp: Date.now(),
-      notificationCount: notifications.length,
-      tokensUsed,
-      status: "SUCCESS",
-    });
-    saveDb(db);
+    try {
+      const db2 = loadDb();
+      if (db2.devices[deviceId]) {
+        db2.devices[deviceId].lastSeenAt = Date.now();
+        db2.devices[deviceId].totalRequests++;
+      }
+      db2.logs.push({
+        deviceId,
+        timestamp: Date.now(),
+        notificationCount: notifications.length,
+        tokensUsed,
+        status: "SUCCESS",
+      });
+      if (db2.logs.length > 1000) db2.logs = db2.logs.slice(-1000);
+      saveDb(db2);
+    } catch (_) {}
 
-    console.log(
-      `[${deviceId.substring(0, 8)}] Analyzed ${notifications.length} notifications (${tokensUsed} tokens)`
-    );
+    console.log(`[${deviceId.substring(0, 8)}] Analyzed ${notifications.length} notifications (${tokensUsed} tokens)`);
 
-    res.json(parsed);
+    return res.json(parsed);
   } catch (error) {
-    const db2 = loadDb();
-    db2.logs.push({
-      deviceId,
-      timestamp: Date.now(),
-      notificationCount: notifications.length,
-      status: "ERROR",
-      error: error.message,
-    });
-    saveDb(db2);
+    console.error("Analyze error:", error.message || error);
 
-    console.error(`[${deviceId.substring(0, 8)}] Error:`, error.message);
+    // Log failure
+    try {
+      const db = loadDb();
+      db.logs.push({
+        deviceId: req.headers?.["x-device-id"] || "unknown",
+        timestamp: Date.now(),
+        notificationCount: req.body?.notifications?.length || 0,
+        status: "ERROR",
+        error: error.message,
+      });
+      saveDb(db);
+    } catch (_) {}
 
     if (error.status === 429) {
       return res.status(429).json({
@@ -126,9 +129,9 @@ module.exports = async (req, res) => {
       });
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       error: "analysis_failed",
-      message: "Failed to analyze notifications. Please try again.",
+      message: error.message || "Failed to analyze notifications.",
     });
   }
 };
