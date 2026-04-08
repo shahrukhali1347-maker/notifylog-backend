@@ -59,9 +59,19 @@ module.exports = async (req, res) => {
       });
     }
 
+    // Sanitize notification fields - only allow expected string/number fields
+    const sanitized = notifications.map((n) => ({
+      appLabel: String(n.appLabel || "").slice(0, 200),
+      title: String(n.title || "").slice(0, 500),
+      body: String(n.body || "").slice(0, 2000),
+      postTimeMs: Number(n.postTimeMs) || 0,
+      category: String(n.category || "unknown").slice(0, 50),
+      rawExtracted: String(n.rawExtracted || "{}").slice(0, 1000),
+    }));
+
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    const userPrompt = `Analyze the following ${notifications.length} notification records:\n\n${JSON.stringify(notifications)}`;
+    const userPrompt = `Analyze the following ${sanitized.length} notification records:\n\n${JSON.stringify(sanitized)}`;
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -101,7 +111,9 @@ module.exports = async (req, res) => {
       });
       if (db2.logs.length > 1000) db2.logs = db2.logs.slice(-1000);
       saveDb(db2);
-    } catch (_) {}
+    } catch (logErr) {
+      console.error("Failed to write log:", logErr.message);
+    }
 
     console.log(`[${deviceId.substring(0, 8)}] Analyzed ${notifications.length} notifications (${tokensUsed} tokens)`);
 
@@ -120,7 +132,9 @@ module.exports = async (req, res) => {
         error: error.message,
       });
       saveDb(db);
-    } catch (_) {}
+    } catch (logErr) {
+      console.error("Failed to write log:", logErr.message);
+    }
 
     if (error.status === 429) {
       return res.status(429).json({
